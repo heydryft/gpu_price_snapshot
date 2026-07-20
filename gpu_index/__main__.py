@@ -3,7 +3,9 @@ import sys
 
 import click
 import psycopg
+import uvicorn
 
+from gpu_index.api import app
 from gpu_index.config import Config
 from gpu_index.db import get_connection, get_latest_prices, get_recent_prices
 from gpu_index.pipeline import init_database, run_fetch
@@ -107,6 +109,20 @@ def run() -> None:
         f"db={config.database_host()})"
     )
     start_scheduler(config)
+
+
+@cli.command()
+@click.option("--host", default="0.0.0.0", help="Host to bind the server to.")
+@click.option("--port", default=8000, type=int, help="Port to bind the server to.")
+def serve(host: str, port: int) -> None:
+    """Start the FastAPI web server for the dashboard."""
+    config = Config.from_env()
+    if not config.database_url:
+        click.echo("Missing DATABASE_URL. Configure .env first.", err=True)
+        sys.exit(1)
+
+    click.echo(f"Starting API server at http://{host}:{port}")
+    uvicorn.run(app, host=host, port=port)
 
 
 if __name__ == "__main__":

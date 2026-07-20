@@ -140,7 +140,11 @@ def get_latest_prices(conn: psycopg.Connection[Any]) -> list[dict[str, Any]]:
             FROM price_snapshots ps
             JOIN gpu_models gm ON gm.id = ps.gpu_model_id
             WHERE ps.fetched_at = (
-                SELECT MAX(fetched_at) FROM price_snapshots
+                SELECT MAX(provider_ps.fetched_at)
+                FROM price_snapshots provider_ps
+                JOIN gpu_models provider_gm
+                    ON provider_gm.id = provider_ps.gpu_model_id
+                WHERE provider_gm.provider = gm.provider
             )
             ORDER BY gm.provider, gm.display_name, ps.instance_type
             """

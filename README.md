@@ -74,6 +74,39 @@ gpu-index list --latest
 gpu-index run
 ```
 
+## Web Dashboard
+
+A React-based web dashboard is available to visualize GPU prices with charts and comparisons.
+
+### Starting the Dashboard
+
+1. Start the FastAPI backend server:
+```bash
+python -m gpu_index serve
+```
+
+2. In a separate terminal, start the React frontend:
+```bash
+cd index-fe
+npm install
+npm run dev
+```
+
+3. Open your browser to `http://localhost:5173`
+
+### Dashboard Features
+
+- **Dashboard View**: Shows all verified GPU models with mini price charts
+- **Comparison View**: Side-by-side price comparison between RunPod and Vast.ai
+- **Price History**: Click any GPU card to view historical price trends
+- **Verified GPU Filter**: Automatically filters out unverified Vast.ai GPU models
+
+### Verified GPU List
+
+The dashboard focuses on these verified GPU models:
+- NVIDIA: H100, A100, A6000, A5000, A4000, A40, RTX 4090/4080/4070, RTX 3090/3080/3070, RTX 6000, L40, L40S, V100
+- AMD: MI300X, MI250X, MI210, MI200
+
 ## Database schema
 
 **gpu_models** — GPU catalog per provider
