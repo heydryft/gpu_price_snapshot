@@ -1,203 +1,270 @@
-import { useState, useEffect } from 'react';
-import { GpuCard } from './components/GpuCard';
-import { ComparisonView } from './components/ComparisonView';
-import { HistoryChart } from './components/HistoryChart';
-import { getLatestPrices, getComparison, getGpuHistory } from './api/client';
-import type { GpuPrice, GpuComparison } from './types';
-import { RefreshCw, Activity } from 'lucide-react';
+import { useState, useEffect, useMemo } from 'react';
+import { fetchPrices } from './api/client';
+import type { GpuPrice } from './types';
+
+type SortKey = 'canonical_name' | 'provider' | 'instance_type' | 'price_per_hour' | 'memory_gb' | 'all_time_low' | 'all_time_high';
+type SortDir = 'asc' | 'desc';
 
 function App() {
   const [prices, setPrices] = useState<GpuPrice[]>([]);
-  const [comparisons, setComparisons] = useState<GpuComparison[]>([]);
-  const [selectedGpu, setSelectedGpu] = useState<{ id: string; name: string } | null>(null);
-  const [gpuHistory, setGpuHistory] = useState<GpuPrice[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [view, setView] = useState<'dashboard' | 'comparison' | 'history'>('dashboard');
+  const [filter, setFilter] = useState('');
   const [providerFilter, setProviderFilter] = useState<'all' | 'runpod' | 'vast'>('all');
+  const [sortKey, setSortKey] = useState<SortKey>('canonical_name');
+  const [sortDir, setSortDir] = useState<SortDir>('asc');
 
-  useEffect(() => {
-    loadData();
-  }, []);
-
-  const loadData = async () => {
+  const load = async () => {
     setLoading(true);
     setError(null);
     try {
-      const [pricesData, comparisonData] = await Promise.all([
-        getLatestPrices(),
-        getComparison(),
-      ]);
-      setPrices(pricesData);
-      setComparisons(comparisonData.comparison);
-    } catch (error) {
-      setError(error instanceof Error ? error.message : 'Failed to load data');
+      setPrices(await fetchPrices());
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to load data');
     } finally {
       setLoading(false);
     }
   };
 
-  const loadGpuHistory = async (gpuId: string, gpuName: string) => {
-    try {
-      const historyData = await getGpuHistory(gpuId);
-      setGpuHistory(historyData.history);
-      setSelectedGpu({ id: gpuId, name: gpuName });
-      setView('history');
-    } catch (error) {
-      console.error('Failed to load history:', error);
+  useEffect(() => { load(); }, []);
+
+  const toggleSort = (key: SortKey) => {
+    if (sortKey === key) {
+      setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortKey(key);
+      setSortDir('asc');
     }
   };
 
-  // Group prices by GPU
-  const providerCounts = {
-    runpod: new Set(prices.filter(price => price.provider === 'runpod').map(price => price.canonical_name)).size,
-    vast: new Set(prices.filter(price => price.provider === 'vast').map(price => price.canonical_name)).size,
-  };
-  const visiblePrices = providerFilter === 'all'
-    ? prices
-    : prices.filter(price => price.provider === providerFilter);
-  const groupedPrices = visiblePrices.reduce((acc, price) => {
-    const key = `${price.provider}-${price.canonical_name}`;
-    if (!acc[key]) acc[key] = [];
-    acc[key].push(price);
-    return acc;
-  }, {} as Record<string, GpuPrice[]>);
+  const rows = useMemo(() => {
+    let filtered = prices;
+    if (providerFilter !== 'all') {
+      filtered = filtered.filter(p => p.provider === providerFilter);
+    }
+    if (filter) {
+      const q = filter.toLowerCase();
+      filtered = filtered.filter(p =>
+        (p.canonical_name ?? '').toLowerCase().includes(q) ||
+        (p.display_name ?? '').toLowerCase().includes(q) ||
+        p.gpu_id.toLowerCase().includes(q)
+      );
+    }
+    const sorted = [...filtered].sort((a, b) => {
+      let cmp = 0;
+      const av = a[sortKey];
+      const bv = b[sortKey];
+      if (av == null && bv == null) cmp = 0;
+      else if (av == null) cmp = 1;
+      else if (bv == null) cmp = -1;
+      else if (typeof av === 'number' && typeof bv === 'number') cmp = av - bv;
+      else cmp = String(av).localeCompare(String(bv));
+      return sortDir === 'asc' ? cmp : -cmp;
+    });
+    return sorted;
+  }, [prices, filter, providerFilter, sortKey, sortDir]);
 
-  const gpuList = Object.values(groupedPrices).sort((a, b) => {
-    const providerOrder = a[0].provider.localeCompare(b[0].provider);
-    return providerOrder || a[0].canonical_name.localeCompare(b[0].canonical_name);
-  });
+  const arrow = (key: SortKey) => sortKey === key ? (sortDir === 'asc' ? ' ↑' : ' ↓') : '';
+
+  const lastUpdated = prices.length > 0
+    ? new Date(Math.max(...prices.map(p => new Date(p.fetched_at).getTime()))).toLocaleString()
+    : null;
+  const modelCount = new Set(prices.map(p => p.canonical_name)).size;
+  const providerCounts = {
+    runpod: prices.filter(p => p.provider === 'runpod').length,
+    vast: prices.filter(p => p.provider === 'vast').length,
+  };
+  const cheapest = prices.length > 0
+    ? prices.reduce((best, price) => price.price_per_hour < best.price_per_hour ? price : best)
+    : null;
+  const observationCount = prices.reduce((total, price) => total + price.observation_count, 0);
 
   return (
-    <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
-      {/* Header */}
-      <header className="bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 sticky top-0 z-10">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
-          <div className="flex justify-between items-center">
-            <div className="flex items-center gap-3">
-              <Activity className="w-8 h-8 text-purple-600" />
-              <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
-                GPU Index
-              </h1>
-            </div>
-            <div className="flex items-center gap-4">
-              <nav className="flex gap-2">
-                <button
-                  onClick={() => setView('dashboard')}
-                  className={`px-4 py-2 rounded-lg font-medium transition-colors ${
-                    view === 'dashboard'
-                      ? 'bg-purple-600 text-white'
-                      : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'
-                  }`}
-                >
-                  Dashboard
-                </button>
-                <button
-                  onClick={() => setView('comparison')}
-                  className={`px-4 py-2 rounded-lg font-medium transition-colors ${
-                    view === 'comparison'
-                      ? 'bg-purple-600 text-white'
-                      : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'
-                  }`}
-                >
-                  Compare
-                </button>
-              </nav>
-              <button
-                onClick={loadData}
-                disabled={loading}
-                className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors disabled:opacity-50"
-                title="Refresh data"
-              >
-                <RefreshCw className={`w-5 h-5 text-gray-600 dark:text-gray-300 ${loading ? 'animate-spin' : ''}`} />
-              </button>
-            </div>
+    <div className="min-h-screen bg-white text-black">
+      <header className="border-b border-black px-6 py-5">
+        <div className="max-w-[1400px] mx-auto flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight">GPU Price Index</h1>
+            <p className="text-sm text-neutral-500 mt-1">
+              {prices.length} current prices across {modelCount} verified models
+              {lastUpdated && <> · Last updated {lastUpdated}</>}
+            </p>
           </div>
+          <button
+            onClick={load}
+            disabled={loading}
+            className="self-start border border-black px-4 py-2 text-sm font-medium hover:bg-black hover:text-white transition-colors disabled:opacity-40"
+          >
+            {loading ? 'Loading…' : 'Refresh'}
+          </button>
         </div>
       </header>
 
-      {/* Main Content */}
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      <main className="max-w-[1400px] mx-auto px-6 py-6">
         {error ? (
-          <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-6">
-            <h3 className="text-lg font-semibold text-red-900 dark:text-red-100 mb-2">Error Loading Data</h3>
-            <p className="text-red-700 dark:text-red-300">{error}</p>
-            <p className="text-sm text-red-600 dark:text-red-400 mt-2">Make sure the backend server is running on http://localhost:8000</p>
-            <button
-              onClick={loadData}
-              className="mt-4 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
-            >
+          <div className="border border-black p-6">
+            <p className="font-semibold">Error: {error}</p>
+            <p className="text-sm text-neutral-500 mt-1">Make sure the backend is running on port 8000.</p>
+            <button onClick={load} className="mt-3 border border-black px-3 py-1 text-sm hover:bg-black hover:text-white transition-colors">
               Retry
             </button>
           </div>
         ) : loading ? (
-          <div className="flex justify-center items-center h-64">
-            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-600"></div>
+          <div className="border border-black px-6 py-16 text-center">
+            <p className="font-semibold">Loading GPU prices…</p>
+            <p className="mt-1 text-sm text-neutral-500">Reading the latest provider snapshots and historical ranges.</p>
           </div>
-        ) : view === 'dashboard' ? (
+        ) : (
           <>
-            <div className="mb-7 flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
-              <div>
-                <p className="text-sm font-semibold uppercase tracking-wider text-purple-600 dark:text-purple-400">Live marketplace index</p>
-                <h2 className="mt-1 text-2xl font-bold text-slate-950 dark:text-white">Latest verified GPU prices</h2>
-                <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
-                  Each provider uses its own latest successful fetch, so both marketplaces remain visible.
-                </p>
-              </div>
-              <div className="inline-flex w-fit rounded-xl bg-slate-200/70 p-1 dark:bg-slate-800">
-                {([
-                  ['all', 'All', providerCounts.runpod + providerCounts.vast],
-                  ['runpod', 'RunPod', providerCounts.runpod],
-                  ['vast', 'Vast.ai', providerCounts.vast],
-                ] as const).map(([value, label, count]) => (
+            <section className="mb-6 grid grid-cols-2 border-l border-t border-black lg:grid-cols-4">
+              <Stat label="Verified models" value={String(modelCount)} />
+              <Stat label="Current listings" value={String(prices.length)} detail={`${providerCounts.runpod} RunPod · ${providerCounts.vast} Vast.ai`} />
+              <Stat label="Lowest current" value={cheapest ? formatPrice(cheapest.price_per_hour, cheapest.currency) : '—'} detail={cheapest ? `${cheapest.canonical_name} · ${formatProvider(cheapest.provider)}` : undefined} />
+              <Stat label="Historical observations" value={observationCount.toLocaleString()} />
+            </section>
+
+            {/* Filters */}
+            <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-4">
+              <input
+                type="text"
+                placeholder="Search GPU model…"
+                value={filter}
+                onChange={e => setFilter(e.target.value)}
+                className="border border-black px-3 py-2 text-sm w-full sm:w-64 outline-none focus:ring-1 focus:ring-black"
+              />
+              <div className="flex gap-1 border border-black">
+                {(['all', 'runpod', 'vast'] as const).map(v => (
                   <button
-                    key={value}
-                    onClick={() => setProviderFilter(value)}
-                    className={`rounded-lg px-4 py-2 text-sm font-semibold transition ${providerFilter === value ? 'bg-white text-slate-950 shadow-sm dark:bg-slate-700 dark:text-white' : 'text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white'}`}
+                    key={v}
+                    onClick={() => setProviderFilter(v)}
+                    className={`px-3 py-2 text-sm font-medium transition-colors ${providerFilter === v ? 'bg-black text-white' : 'hover:bg-neutral-100'}`}
                   >
-                    {label} <span className="ml-1 opacity-60">{count}</span>
+                    {v === 'all' ? `All ${prices.length}` : v === 'runpod' ? `RunPod ${providerCounts.runpod}` : `Vast.ai ${providerCounts.vast}`}
                   </button>
                 ))}
               </div>
+              <span className="text-sm text-neutral-500">{rows.length} results</span>
             </div>
-            {gpuList.length > 0 ? (
-              <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
-                {gpuList.map(gpuPrices => (
-                  <div key={`${gpuPrices[0].provider}-${gpuPrices[0].canonical_name}`} onClick={() => loadGpuHistory(gpuPrices[0].gpu_id, gpuPrices[0].canonical_name)}>
-                    <GpuCard prices={gpuPrices} />
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-10 text-center text-slate-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-400">
-                No verified {providerFilter === 'all' ? '' : providerFilter === 'runpod' ? 'RunPod' : 'Vast.ai'} GPU prices were found in the latest fetch.
-              </div>
-            )}
+
+            {/* Table */}
+            <div className="overflow-x-auto border border-black">
+              <table className="w-full min-w-[1180px] text-sm">
+                <thead className="sticky top-0 z-10">
+                  <tr className="border-b border-black bg-neutral-50">
+                    <Th onClick={() => toggleSort('canonical_name')}>GPU{arrow('canonical_name')}</Th>
+                    <Th onClick={() => toggleSort('provider')}>Provider{arrow('provider')}</Th>
+                    <Th onClick={() => toggleSort('memory_gb')}>VRAM{arrow('memory_gb')}</Th>
+                    <Th onClick={() => toggleSort('instance_type')}>Price type{arrow('instance_type')}</Th>
+                    <Th onClick={() => toggleSort('price_per_hour')}>Current{arrow('price_per_hour')}</Th>
+                    <Th onClick={() => toggleSort('all_time_low')}>All-time low{arrow('all_time_low')}</Th>
+                    <Th onClick={() => toggleSort('all_time_high')}>All-time high{arrow('all_time_high')}</Th>
+                    <Th>Availability</Th>
+                    <Th>History</Th>
+                    <Th>Updated</Th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map(p => (
+                    <tr key={`${p.provider}-${p.gpu_id}-${p.instance_type}-${p.fetched_at}`} className="border-b border-neutral-200 align-top hover:bg-neutral-50">
+                      <td className="px-4 py-3">
+                        <p className="font-semibold">{p.canonical_name}</p>
+                        <p className="mt-0.5 max-w-52 truncate text-xs text-neutral-500" title={`${p.display_name ?? p.gpu_id} · ${p.gpu_id}`}>
+                          {p.display_name ?? p.gpu_id}
+                        </p>
+                      </td>
+                      <td className="px-4 py-3 font-medium">{formatProvider(p.provider)}</td>
+                      <td className="px-4 py-3">{p.memory_gb != null ? `${Math.round(p.memory_gb)} GB` : '—'}</td>
+                      <td className="px-4 py-3">{formatPriceType(p.instance_type)}</td>
+                      <td className="px-4 py-3 font-mono font-bold">{formatPrice(p.price_per_hour, p.currency)}</td>
+                      <td className="px-4 py-3 font-mono">{formatPrice(p.all_time_low, p.currency)}</td>
+                      <td className="px-4 py-3 font-mono">{formatPrice(p.all_time_high, p.currency)}</td>
+                      <td className="px-4 py-3 text-xs">{formatAvailability(p)}</td>
+                      <td className="px-4 py-3 text-xs">
+                        <p>{p.observation_count.toLocaleString()} observations</p>
+                        <p className="mt-0.5 text-neutral-500">Since {formatDate(p.first_seen_at)}</p>
+                      </td>
+                      <td className="px-4 py-3 text-xs text-neutral-500">{formatDateTime(p.fetched_at)}</td>
+                    </tr>
+                  ))}
+                  {rows.length === 0 && (
+                    <tr><td colSpan={10} className="px-4 py-10 text-center text-neutral-400">No matching prices.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
           </>
-        ) : view === 'comparison' ? (
-          <ComparisonView comparisons={comparisons} />
-        ) : view === 'history' && selectedGpu ? (
-          <div>
-            <button
-              onClick={() => setView('dashboard')}
-              className="mb-4 text-purple-600 hover:text-purple-700 dark:text-purple-400 font-medium"
-            >
-              ← Back to Dashboard
-            </button>
-            <HistoryChart history={gpuHistory} gpuName={selectedGpu.name} />
-          </div>
-        ) : null}
+        )}
       </main>
 
-      {/* Footer */}
-      <footer className="bg-white dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700 mt-12">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
-          <p className="text-center text-gray-600 dark:text-gray-400 text-sm">
-            Data updated hourly • Prices in USD/hour
-          </p>
-        </div>
+      <footer className="border-t border-black px-6 py-4 mt-12">
+        <p className="text-center text-xs text-neutral-400">
+          GPU Price Index · Data fetched hourly from RunPod &amp; Vast.ai · Prices in USD
+        </p>
       </footer>
     </div>
+  );
+}
+
+function formatProvider(provider: string) {
+  return provider === 'runpod' ? 'RunPod' : provider === 'vast' ? 'Vast.ai' : provider;
+}
+
+function formatPriceType(type: string) {
+  const labels: Record<string, string> = {
+    secure: 'Secure cloud',
+    community: 'Community cloud',
+    secure_spot: 'Secure spot',
+    community_spot: 'Community spot',
+    ondemand: 'On-demand',
+    bid: 'Bid / interruptible',
+  };
+  return labels[type] ?? type.replaceAll('_', ' ');
+}
+
+function formatPrice(price: number, currency: string) {
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: currency || 'USD',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 4,
+  }).format(price);
+}
+
+function formatAvailability(price: GpuPrice) {
+  if (!price.stock_status) return 'Not reported';
+  if (price.provider === 'vast' && /^\d+$/.test(price.stock_status)) {
+    return `${Number(price.stock_status).toLocaleString()} verified offers`;
+  }
+  return price.stock_status.replaceAll('_', ' ');
+}
+
+function formatDate(value: string) {
+  return new Date(value).toLocaleDateString([], { dateStyle: 'medium' });
+}
+
+function formatDateTime(value: string) {
+  return new Date(value).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
+}
+
+function Stat({ label, value, detail }: { label: string; value: string; detail?: string }) {
+  return (
+    <div className="border-b border-r border-black p-4 sm:p-5">
+      <p className="text-xs font-semibold uppercase tracking-wider text-neutral-500">{label}</p>
+      <p className="mt-2 text-2xl font-bold tracking-tight">{value}</p>
+      {detail && <p className="mt-1 text-xs text-neutral-500">{detail}</p>}
+    </div>
+  );
+}
+
+function Th({ children, onClick }: { children: React.ReactNode; onClick?: () => void }) {
+  return (
+    <th scope="col" className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider">
+      {onClick ? (
+        <button type="button" onClick={onClick} className="whitespace-nowrap hover:underline focus:outline-none focus-visible:underline">
+          {children}
+        </button>
+      ) : children}
+    </th>
   );
 }
 

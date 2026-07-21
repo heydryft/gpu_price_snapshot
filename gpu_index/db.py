@@ -128,6 +128,17 @@ def get_latest_prices(conn: psycopg.Connection[Any]) -> list[dict[str, Any]]:
     with conn.cursor() as cur:
         cur.execute(
             """
+            WITH price_stats AS (
+                SELECT
+                    gpu_model_id,
+                    instance_type,
+                    MIN(price_per_hour) AS all_time_low,
+                    MAX(price_per_hour) AS all_time_high,
+                    COUNT(*) AS observation_count,
+                    MIN(fetched_at) AS first_seen_at
+                FROM price_snapshots
+                GROUP BY gpu_model_id, instance_type
+            )
             SELECT
                 gm.provider,
                 gm.gpu_id,
@@ -135,10 +146,18 @@ def get_latest_prices(conn: psycopg.Connection[Any]) -> list[dict[str, Any]]:
                 gm.memory_gb,
                 ps.instance_type,
                 ps.price_per_hour,
+                ps.currency,
                 ps.stock_status,
-                ps.fetched_at
+                ps.fetched_at,
+                stats.all_time_low,
+                stats.all_time_high,
+                stats.observation_count,
+                stats.first_seen_at
             FROM price_snapshots ps
             JOIN gpu_models gm ON gm.id = ps.gpu_model_id
+            JOIN price_stats stats
+                ON stats.gpu_model_id = ps.gpu_model_id
+                AND stats.instance_type = ps.instance_type
             WHERE ps.fetched_at = (
                 SELECT MAX(provider_ps.fetched_at)
                 FROM price_snapshots provider_ps

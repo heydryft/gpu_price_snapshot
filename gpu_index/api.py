@@ -1,17 +1,14 @@
-from datetime import datetime, timedelta
 import re
 from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 
 from gpu_index.config import Config
-from gpu_index.db import get_connection, get_latest_prices, get_recent_prices
+from gpu_index.db import get_connection, get_latest_prices
 
 app = FastAPI(title="GPU Index API")
 
-# Allow CORS for frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,18 +18,10 @@ app.add_middleware(
 )
 
 
-class GpuPrice(BaseModel):
-    provider: str
-    gpu_id: str
-    display_name: str | None
-    memory_gb: float | None
-    instance_type: str
-    price_per_hour: float
-    stock_status: str | None
-    fetched_at: datetime
+# ---------------------------------------------------------------------------
+# Canonical name normalization
+# ---------------------------------------------------------------------------
 
-
-# List of verified/common GPU models to focus on
 VERIFIED_GPUS = {
     "H100", "H100 NVL", "H200", "A100 80GB", "A100 40GB", "A100",
     "RTX 6000 Ada", "RTX A6000", "RTX A5000", "RTX A4000", "A40",
@@ -105,11 +94,10 @@ def is_verified_gpu(
     gpu_id: str | None,
     memory_gb: float | None = None,
 ) -> bool:
-    """Check if GPU is in the verified list"""
     return canonical_gpu_name(display_name, gpu_id, memory_gb) in VERIFIED_GPUS
 
 
-def with_canonical_name(price: dict[str, Any]) -> dict[str, Any]:
+def enrich(price: dict[str, Any]) -> dict[str, Any]:
     result = dict(price)
     result["canonical_name"] = canonical_gpu_name(
         price.get("display_name"),
@@ -119,140 +107,24 @@ def with_canonical_name(price: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def price_metric(
-    runpod: list[dict[str, Any]],
-    vast: list[dict[str, Any]],
-    runpod_types: set[str],
-    vast_types: set[str],
-) -> dict[str, Any] | None:
-    runpod_prices = [
-        row["price_per_hour"] for row in runpod
-        if row["instance_type"] in runpod_types
-    ]
-    vast_prices = [
-        row["price_per_hour"] for row in vast
-        if row["instance_type"] in vast_types
-    ]
-    if not runpod_prices or not vast_prices:
-        return None
-    runpod_price = min(runpod_prices)
-    vast_price = min(vast_prices)
-    difference = abs(runpod_price - vast_price)
-    baseline = max(runpod_price, vast_price)
-    return {
-        "runpod_price": runpod_price,
-        "vast_price": vast_price,
-        "difference_per_hour": difference,
-        "difference_percent": (difference / baseline * 100) if baseline else 0,
-        "cheaper_provider": "runpod" if runpod_price < vast_price else "vast",
-    }
-
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
 
 @app.get("/api/gpus/latest")
 def get_latest_gpu_prices() -> dict[str, Any]:
-    """Get latest GPU prices, filtered to verified models"""
+    """All verified GPU prices from each provider's latest fetch."""
     config = Config.from_env()
-    
+
     with get_connection(config.database_url) as conn:
         all_prices = get_latest_prices(conn)
-    
-    # Filter to verified GPUs
-    verified_prices = [
-        with_canonical_name(price) for price in all_prices
-        if is_verified_gpu(
-            price.get("display_name"),
-            price.get("gpu_id"),
-            price.get("memory_gb"),
-        )
+
+    verified = [
+        enrich(p) for p in all_prices
+        if is_verified_gpu(p.get("display_name"), p.get("gpu_id"), p.get("memory_gb"))
     ]
-    provider_counts = {
-        provider: sum(1 for price in verified_prices if price["provider"] == provider)
-        for provider in ("runpod", "vast")
-    }
-    
-    return {"prices": verified_prices, "provider_counts": provider_counts}
 
-
-@app.get("/api/gpus/history/{gpu_id}")
-def get_gpu_history(gpu_id: str, hours: int = 168) -> dict[str, Any]:
-    """Get price history for a specific GPU over the last N hours (default 7 days)"""
-    config = Config.from_env()
-    cutoff = datetime.now() - timedelta(hours=hours)
-    
-    with get_connection(config.database_url) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT
-                    gm.provider,
-                    gm.gpu_id,
-                    gm.display_name,
-                    ps.instance_type,
-                    ps.price_per_hour,
-                    ps.stock_status,
-                    ps.fetched_at
-                FROM price_snapshots ps
-                JOIN gpu_models gm ON gm.id = ps.gpu_model_id
-                WHERE gm.gpu_id = %s
-                    AND ps.fetched_at >= %s
-                ORDER BY ps.fetched_at ASC
-                """,
-                (gpu_id, cutoff),
-            )
-            history = cur.fetchall()
-    
-    return {"gpu_id": gpu_id, "history": history}
-
-
-@app.get("/api/gpus/compare")
-def compare_providers() -> dict[str, Any]:
-    """Compare prices between RunPod and Vast for common GPUs"""
-    config = Config.from_env()
-    
-    with get_connection(config.database_url) as conn:
-        all_prices = get_latest_prices(conn)
-    
-    # Group by GPU name
-    gpu_comparison: dict[str, dict[str, Any]] = {}
-    for raw_price in all_prices:
-        price = with_canonical_name(raw_price)
-        canonical_name = price["canonical_name"]
-        if canonical_name not in VERIFIED_GPUS:
-            continue
-        if canonical_name not in gpu_comparison:
-            gpu_comparison[canonical_name] = {
-                "canonical_name": canonical_name,
-                "display_name": canonical_name,
-                "memory_gb": price.get("memory_gb"),
-                "runpod": [],
-                "vast": [],
-            }
-        provider = price.get("provider")
-        if provider in ("runpod", "vast"):
-            gpu_comparison[canonical_name][provider].append(price)
-    
-    # Filter to GPUs available on both platforms or verified
-    comparison_list = []
-    for gpu in gpu_comparison.values():
-        if not gpu["runpod"] or not gpu["vast"]:
-            continue
-        gpu["on_demand"] = price_metric(
-            gpu["runpod"],
-            gpu["vast"],
-            {"secure", "community"},
-            {"ondemand"},
-        )
-        gpu["interruptible"] = price_metric(
-            gpu["runpod"],
-            gpu["vast"],
-            {"secure_spot", "community_spot"},
-            {"bid"},
-        )
-        if gpu["on_demand"] or gpu["interruptible"]:
-            comparison_list.append(gpu)
-    comparison_list.sort(key=lambda gpu: gpu["canonical_name"])
-    
-    return {"comparison": comparison_list}
+    return {"prices": verified}
 
 
 @app.get("/api/health")
