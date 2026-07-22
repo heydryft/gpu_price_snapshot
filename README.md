@@ -139,30 +139,42 @@ The dashboard focuses on these verified GPU models:
 
 Each provider is fetched independently — if one API fails, the other's data is still saved. Transient HTTP errors are retried once with a 30s timeout.
 
-## Hosting on AWS EC2
+## Deployment
 
-This guide walks through running the full stack (FastAPI backend + React frontend + scheduled fetching) on a single EC2 instance.
+The project uses a hybrid deployment: **backend on AWS EC2** (FastAPI + scheduled fetcher) and **frontend on Vercel** (static CDN-hosted React app).
 
-### 1. Launch an EC2 instance
+```
+┌─────────────────┐     HTTPS     ┌──────────────────┐
+│  Vercel (CDN)   │ ────────────▶ │  AWS EC2         │
+│  React frontend │  /api/* calls │  FastAPI backend │
+│  gpu.your.site  │               │  api.your.site   │
+└─────────────────┘               │  + fetcher cron  │
+                                  │  + Neon/RDS DB   │
+                                  └──────────────────┘
+```
+
+### Part 1 — Backend on AWS EC2
+
+#### 1. Launch an EC2 instance
 
 - **AMI**: Ubuntu Server 24.04 LTS (or 22.04 LTS)
-- **Instance type**: `t3.small` is enough to start; use `t3.medium` or larger if you keep a lot of history or want a local PostgreSQL instance
+- **Instance type**: `t3.small` is enough to start
 - **Storage**: at least 20 GB gp3
 - **Security group**: allow inbound
   - SSH (port 22) from your IP
-  - HTTP (port 80) from `0.0.0.0/0`
-  - HTTPS (port 443) from `0.0.0.0/0`
+  - HTTP (port 80) from `0.0.0.0/0` — for Let's Encrypt
+  - HTTPS (port 443) from `0.0.0.0/0` — for API access from Vercel
 
-### 2. Connect and install base packages
+#### 2. Connect and install base packages
 
 ```bash
 ssh -i your-key.pem ubuntu@<your-ec2-public-ip>
 
 sudo apt update && sudo apt upgrade -y
-sudo apt install -y python3-pip python3-venv nodejs npm nginx postgresql postgresql-contrib certbot python3-certbot-nginx git
+sudo apt install -y python3-pip python3-venv nginx certbot python3-certbot-nginx git
 ```
 
-### 3. Choose a database
+#### 3. Choose a database
 
 **Option A — External managed PostgreSQL (recommended)**
 
@@ -175,6 +187,7 @@ DATABASE_URL=postgresql://user:password@your-db-host/dbname?sslmode=require
 **Option B — Local PostgreSQL on the instance**
 
 ```bash
+sudo apt install -y postgresql postgresql-contrib
 sudo systemctl enable --now postgresql
 sudo -u postgres psql -c "CREATE USER gpuindex WITH PASSWORD 'change-me';"
 sudo -u postgres psql -c "CREATE DATABASE gpuindex OWNER gpuindex;"
@@ -186,11 +199,10 @@ Set `.env` to:
 DATABASE_URL=postgresql://gpuindex:change-me@localhost:5432/gpuindex
 ```
 
-### 4. Clone and set up the project
+#### 4. Clone and set up the project
 
 ```bash
 git clone https://github.com/<your-org>/gpu_index.git
-# or scp / rsync the project folder to the instance
 cd gpu_index
 
 python3 -m venv .venv
@@ -204,18 +216,7 @@ nano .env
 python -m gpu_index init-db
 ```
 
-### 5. Build and serve the frontend
-
-```bash
-cd index-fe
-npm install
-npm run build
-cd ..
-```
-
-The static files are written to `index-fe/dist`.
-
-### 6. Create systemd services
+#### 5. Create systemd services
 
 `/etc/systemd/system/gpu-index-backend.service`:
 
@@ -257,7 +258,7 @@ Restart=on-failure
 WantedBy=multi-user.target
 ```
 
-Enable and start the services:
+Enable and start:
 
 ```bash
 sudo systemctl daemon-reload
@@ -265,21 +266,18 @@ sudo systemctl enable --now gpu-index-backend
 sudo systemctl enable --now gpu-index-fetcher
 ```
 
-### 7. Configure Nginx
+#### 6. Configure Nginx as API reverse proxy
 
-`/etc/nginx/sites-available/gpu-index`:
+The backend only serves `/api/*` — the frontend is on Vercel, so Nginx proxies API requests only.
+
+`/etc/nginx/sites-available/gpu-index-api`:
 
 ```nginx
 server {
     listen 80;
-    server_name your-domain.com;
+    server_name api.your-domain.com;
 
     location / {
-        root /home/ubuntu/gpu_index/index-fe/dist;
-        try_files $uri /index.html;
-    }
-
-    location /api/ {
         proxy_pass http://127.0.0.1:8000;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
@@ -290,37 +288,37 @@ server {
 }
 ```
 
-Activate the site:
+Activate:
 
 ```bash
-sudo ln -s /etc/nginx/sites-available/gpu-index /etc/nginx/sites-enabled/
+sudo ln -s /etc/nginx/sites-available/gpu-index-api /etc/nginx/sites-enabled/
 sudo nginx -t
 sudo systemctl restart nginx
 ```
 
-### 8. Add HTTPS with Let's Encrypt
+#### 7. Add HTTPS with Let's Encrypt
 
 ```bash
-sudo certbot --nginx -d your-domain.com
+sudo certbot --nginx -d api.your-domain.com
 ```
 
-Follow the prompts. Certbot will update the Nginx config and auto-renew the certificate.
+Certbot will update the Nginx config and auto-renew the certificate.
 
-### 9. Update environment for production
+After this, your backend is reachable at `https://api.your-domain.com/api/`.
 
-Make sure your `.env` on the server does not contain `VITE_API_BASE_URL` so the frontend uses relative `/api/` requests. The backend `serve` command should bind to `127.0.0.1:8000`, not `0.0.0.0`, since Nginx proxies it.
+#### 8. Backend environment
 
 ```bash
-# .env
+# .env on the EC2 instance
 RUNPOD_API_KEY=...
 VAST_API_KEY=...
 DATABASE_URL=...
 FETCH_INTERVAL_HOURS=1
 ```
 
-### 10. Redeploy after changes
+The backend already has CORS configured to allow all origins, so Vercel frontend requests will work.
 
-When you push new code:
+#### 9. Redeploy backend after changes
 
 ```bash
 ssh -i your-key.pem ubuntu@<your-ec2-public-ip>
@@ -328,22 +326,71 @@ cd ~/gpu_index
 git pull
 source .venv/bin/activate
 pip install -e .  # if pyproject.toml changed
-cd index-fe
-npm install
-npm run build
-cd ..
 sudo systemctl restart gpu-index-backend gpu-index-fetcher
 ```
 
-### Useful commands
+#### Useful backend commands
 
 ```bash
-# View backend logs
-sudo journalctl -u gpu-index-backend -f
-
-# View fetcher logs
-sudo journalctl -u gpu-index-fetcher -f
-
-# Restart services
+sudo journalctl -u gpu-index-backend -f      # backend logs
+sudo journalctl -u gpu-index-fetcher -f      # fetcher logs
 sudo systemctl restart gpu-index-backend gpu-index-fetcher
 ```
+
+---
+
+### Part 2 — Frontend on Vercel
+
+#### 1. Push to GitHub
+
+Make sure your `gpu_index` repo (including the `index-fe/` directory) is on GitHub.
+
+#### 2. Create a Vercel project
+
+1. Go to [vercel.com](https://vercel.com) and sign in with GitHub
+2. Click **Add New → Project**
+3. Import your `gpu_index` repository
+4. Configure the project:
+   - **Root Directory**: `index-fe`
+   - **Framework Preset**: Vite (auto-detected from `vercel.json`)
+   - **Build Command**: `npm run build` (auto-detected)
+   - **Output Directory**: `dist` (auto-detected)
+5. Under **Environment Variables**, add:
+   - `VITE_API_BASE_URL` = `https://api.your-domain.com`
+   - This tells the frontend where the EC2 backend lives
+6. Click **Deploy**
+
+Vercel will run `npm run build` and serve `dist/` on a global CDN. The `vercel.json` in `index-fe/` handles SPA routing (all paths fall back to `index.html`).
+
+#### 3. Add a custom domain (optional)
+
+1. In Vercel → Project → Settings → Domains
+2. Add `gpu.your-domain.com` (or whatever subdomain you prefer)
+3. Add the CNAME record Vercel shows you in your DNS provider
+4. Vercel provisions HTTPS automatically
+
+#### 4. Redeploy frontend after changes
+
+Push to your `main` branch on GitHub — Vercel auto-deploys on every push. No manual steps needed.
+
+To deploy from the CLI instead:
+
+```bash
+cd index-fe
+npx vercel --prod
+```
+
+#### 5. Local development
+
+For local dev, the Vite dev server proxies `/api` to `localhost:8000` (configured in `vite.config.ts`). No `VITE_API_BASE_URL` is needed locally.
+
+```bash
+# Terminal 1 — backend
+python -m gpu_index serve
+
+# Terminal 2 — frontend
+cd index-fe
+npm run dev
+```
+
+Open `http://localhost:5173`.
