@@ -202,8 +202,8 @@ DATABASE_URL=postgresql://gpuindex:change-me@localhost:5432/gpuindex
 #### 4. Clone and set up the project
 
 ```bash
-git clone https://github.com/<your-org>/gpu_index.git
-cd gpu_index
+git clone https://github.com/<your-org>/gpu_price_snapshot.git
+cd gpu_price_snapshot
 
 python3 -m venv .venv
 source .venv/bin/activate
@@ -228,10 +228,10 @@ After=network.target
 [Service]
 Type=simple
 User=ubuntu
-WorkingDirectory=/home/ubuntu/gpu_index
-Environment=PATH=/home/ubuntu/gpu_index/.venv/bin
-EnvironmentFile=/home/ubuntu/gpu_index/.env
-ExecStart=/home/ubuntu/gpu_index/.venv/bin/python -m gpu_index serve --host 127.0.0.1 --port 8000
+WorkingDirectory=/home/ubuntu/gpu_price_snapshot
+Environment=PATH=/home/ubuntu/gpu_price_snapshot/.venv/bin
+EnvironmentFile=/home/ubuntu/gpu_price_snapshot/.env
+ExecStart=/home/ubuntu/gpu_price_snapshot/.venv/bin/python -m gpu_index serve --host 127.0.0.1 --port 8000
 Restart=on-failure
 
 [Install]
@@ -248,10 +248,10 @@ After=network.target
 [Service]
 Type=simple
 User=ubuntu
-WorkingDirectory=/home/ubuntu/gpu_index
-Environment=PATH=/home/ubuntu/gpu_index/.venv/bin
-EnvironmentFile=/home/ubuntu/gpu_index/.env
-ExecStart=/home/ubuntu/gpu_index/.venv/bin/python -m gpu_index run
+WorkingDirectory=/home/ubuntu/gpu_price_snapshot
+Environment=PATH=/home/ubuntu/gpu_price_snapshot/.venv/bin
+EnvironmentFile=/home/ubuntu/gpu_price_snapshot/.env
+ExecStart=/home/ubuntu/gpu_price_snapshot/.venv/bin/python -m gpu_index run
 Restart=on-failure
 
 [Install]
@@ -322,7 +322,7 @@ The backend already has CORS configured to allow all origins, so Vercel frontend
 
 ```bash
 ssh -i your-key.pem ubuntu@<your-ec2-public-ip>
-cd ~/gpu_index
+cd ~/gpu_price_snapshot
 git pull
 source .venv/bin/activate
 pip install -e .  # if pyproject.toml changed
@@ -343,13 +343,13 @@ sudo systemctl restart gpu-index-backend gpu-index-fetcher
 
 #### 1. Push to GitHub
 
-Make sure your `gpu_index` repo (including the `index-fe/` directory) is on GitHub.
+Make sure your `gpu_price_snapshot` repo (including the `index-fe/` directory) is on GitHub.
 
 #### 2. Create a Vercel project
 
 1. Go to [vercel.com](https://vercel.com) and sign in with GitHub
 2. Click **Add New → Project**
-3. Import your `gpu_index` repository
+3. Import your `gpu_price_snapshot` repository
 4. Configure the project:
    - **Root Directory**: `index-fe`
    - **Framework Preset**: Vite (auto-detected from `vercel.json`)
